@@ -44,6 +44,7 @@ def seed() -> None:
         })
 
     guidelines = json.loads((DATA_DIRECTORY / "guidelines.json").read_text(encoding="utf-8"))
+    prescription_guidelines = json.loads((DATA_DIRECTORY / "prescription_guidelines.json").read_text(encoding="utf-8"))
     guideline_documents = [
         {
             "_code": normalize_anomaly_code(code),
@@ -74,7 +75,25 @@ def seed() -> None:
             ),
             metadata={"anomaly_code": normalize_anomaly_code(code), "kind": "clinical_guideline"},
         )
-    print(f"Seeded {len(interaction_documents)} interactions and {len(guideline_documents)} guidelines into {database_name}")
+    for record in prescription_guidelines:
+        rag_store.upsert_document(
+            source=f"prescription_guidelines.json:{record['id']}",
+            text=record["text"],
+            metadata={
+                "document_id": record["document_id"],
+                "section": record["section"],
+                "page": record["page"],
+                "version": record["version"],
+                "jurisdiction": record["jurisdiction"],
+                "publication_date": record["publication_date"],
+                "medication": record["medication"],
+                "condition": record["condition"],
+                "topic": record["topic"],
+                "source_url": record["source_url"],
+                "kind": "prescription_guideline",
+            },
+        )
+    print(f"Seeded {len(interaction_documents)} interactions, {len(guideline_documents)} anomaly guidelines, and {len(prescription_guidelines)} prescription records into {database_name}")
 
 
 if __name__ == "__main__":

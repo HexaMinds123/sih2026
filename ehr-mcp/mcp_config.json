@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "ehr-mcp": {
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "d:\\sih2026\\ehr-mcp",
+      "env": {
+        "AGENT_API_TOKEN": "medical-agent-secret-token",
+        "MONGO_URI": "mongodb+srv://karthik:karthik@projects.ktwm3ms.mongodb.net/?appName=projects",
+        "MONGO_DATABASE": "clinical_knowledge",
+        "MONGO_PATIENT_RAG_COLLECTION": "patient_chunks"
+      }
+    },
+    "clinical-guidelines": {
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "d:\\sih2026\\clinical-mcp",
+      "env": {
+        "CLINICAL_MCP_STORAGE": "mongo",
+        "MONGO_URI": "mongodb+srv://karthik:karthik@projects.ktwm3ms.mongodb.net/?appName=projects",
+        "MONGO_DATABASE": "clinical_knowledge"
+      }
+    }
+  }
+}

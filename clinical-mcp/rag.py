@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -22,27 +22,32 @@ class RetrievedChunk:
 
 
 class EmbeddingModel:
-    """Lazy sentence-transformer wrapper so importing the MCP server stays cheap."""
+    """Process-cached sentence-transformer wrapper."""
+
+    _models: ClassVar[dict[str, Any]] = {}
 
     def __init__(self, model_name: str | None = None) -> None:
         self.model_name = model_name or os.getenv(
             "CLINICAL_MCP_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
         )
-        self._model: Any = None
+        self._model = self._load()
 
     def _load(self) -> Any:
-        if self._model is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as error:
-                raise RuntimeError(
-                    "RAG embeddings require sentence-transformers. Install requirements.txt."
-                ) from error
-            self._model = SentenceTransformer(self.model_name)
-        return self._model
+        cached = self._models.get(self.model_name)
+        if cached is not None:
+            return cached
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as error:
+            raise RuntimeError(
+                "RAG embeddings require sentence-transformers. Install requirements.txt."
+            ) from error
+        model = SentenceTransformer(self.model_name)
+        self._models[self.model_name] = model
+        return model
 
     def encode(self, text: str) -> list[float]:
-        vector = self._load().encode(text, normalize_embeddings=True)
+        vector = self._model.encode(text, normalize_embeddings=True)
         return [float(value) for value in vector]
 
 
@@ -90,7 +95,13 @@ class MongoRAGStore:
             self._chunks.insert_many(documents)
         return len(documents)
 
-    def search(self, query: str, limit: int = 5, minimum_score: float = 0.25) -> list[RetrievedChunk]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        minimum_score: float = 0.25,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[RetrievedChunk]:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("RAG query must be non-empty")
         if limit < 1 or limit > 20:
@@ -98,6 +109,9 @@ class MongoRAGStore:
         query_vector = np.asarray(self._embedding_model.encode(query), dtype=np.float32)
         results: list[RetrievedChunk] = []
         for record in self._chunks.find({}, {"_id": 0}):
+            metadata = dict(record.get("metadata", {}))
+            if metadata_filter and any(metadata.get(key) != value for key, value in metadata_filter.items()):
+                continue
             vector = np.asarray(record.get("embedding", []), dtype=np.float32)
             if vector.size == 0 or vector.shape != query_vector.shape:
                 continue
@@ -107,6 +121,6 @@ class MongoRAGStore:
                     text=str(record["text"]),
                     score=round(score, 4),
                     source=str(record.get("source", "unknown")),
-                    metadata=dict(record.get("metadata", {})),
+                    metadata=metadata,
                 ))
         return sorted(results, key=lambda result: result.score, reverse=True)[:limit]

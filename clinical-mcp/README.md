@@ -7,6 +7,7 @@ This server provides reference-based clinical decision support. It contains no p
 ```powershell
 cd clinical-mcp
 python -m pip install -r requirements.txt
+npx @modelcontextprotocol/inspector python server.py
 ```
 
 The project includes a local `.env` file for MongoDB settings. Keep that file private and never commit it. The seed script loads it automatically. A shell environment variable takes precedence over values in `.env`.
@@ -37,9 +38,11 @@ The seed command:
 2. Replaces the configured interaction and guideline collections with the JSON dataset.
 3. Creates indexes on `_key` and `_code`.
 4. Chunks each guideline and generates normalized embeddings.
-5. Replaces the matching RAG documents in `clinical_chunks`.
+5. Replaces the matching anomaly and prescription RAG documents in `clinical_chunks`.
 
-The current dataset seeds 7 drug interactions and 8 clinical guidelines.
+The current dataset seeds 7 drug interactions, 8 anomaly guidelines, and 20 prescription-guideline records covering 9 medications: amlodipine, glipizide, ibuprofen, lisinopril, losartan, metformin, omeprazole, simvastatin, and warfarin.
+
+Prescription records are sourced from verified U.S. DailyMed/FDA label pages and retain document ID, section, label version, update date, jurisdiction, and source URL metadata in the existing `clinical_chunks` collection.
 
 If the command reports `No module named 'sentence_transformers'`, install the project dependencies with the same interpreter used to run the seed:
 
@@ -66,12 +69,36 @@ $env:CLINICAL_MCP_STORAGE = "mongo"
 python server.py
 ```
 
-The server uses MCP stdio transport for local MCP clients. Configure the client to run `python server.py` with `clinical-mcp` as its working directory. The Mongo backend requires the same environment variables used by the seed command.
+The server uses MCP stdio transport for local MCP clients. `python server.py` is a protocol process, not an interactive command prompt: do not type blank lines or tool arguments into its PowerShell window. Every stdin line must be a valid MCP JSON-RPC message. Seeing `Invalid JSON: EOF while parsing` after pressing Enter means the server received an empty line.
+
+Configure an MCP client to run `python server.py` with `clinical-mcp` as its working directory. The Mongo backend requires the same environment variables used by the seed command. For local interactive inspection, use the MCP inspector rather than typing into the server process:
+
+```powershell
+npx @modelcontextprotocol/inspector python server.py
+```
+
+For a VS Code MCP configuration, use the Python executable and project directory explicitly:
+
+```json
+{
+	"servers": {
+		"clinical-guidelines": {
+			"type": "stdio",
+			"command": "C:\\Users\\ambat\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+			"args": ["server.py"],
+			"cwd": "C:\\Users\\ambat\\OneDrive\\Documents\\GitHub\\sih2026\\clinical-mcp"
+		}
+	}
+}
+```
+
+Keep the Mongo environment variables available to the MCP client, or place them in the project `.env` file.
 
 ## Tools
 
 - `query_drug_interactions(meds_list)` checks every medication pair against the curated interaction collection and returns structured severity and warning fields.
 - `search_clinical_guidance(anomaly_code)` returns observation context, a recommended verification or clinical-review action, and ranked source evidence retrieved from MongoDB embeddings.
+- `search_prescription_guidance(medication, condition, dosage)` retrieves clinical guideline evidence and U.S. DailyMed / FDA label provenance for a specific medication and clinical condition.
 
 Example inputs:
 
@@ -83,7 +110,11 @@ Example inputs:
 {"anomaly_code": "LOW_SPO2"}
 ```
 
-The guidance response includes the anomaly code, parameter, observation, recommended action, evidence text, similarity score, and source metadata.
+```json
+{"medication": "Metformin", "condition": "Type 2 Diabetes", "dosage": "500 mg twice daily"}
+```
+
+The guidance response includes the anomaly code or medication, observation/indication, recommended action, evidence text, similarity score, and source DailyMed metadata.
 
 Unknown records are reported as unknown. The server does not infer interactions, identify diseases, assert that a patient has a condition, or generate a diagnosis from retrieved text.
 

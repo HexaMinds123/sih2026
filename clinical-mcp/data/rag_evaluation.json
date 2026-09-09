@@ -1,0 +1,10 @@
+[
+  {"query": "Metformin Type 2 Diabetes 500 mg twice daily clinical guideline", "expected_medication": "metformin", "expected_kind": "prescription_guideline", "expected_relevance": true},
+  {"query": "Amlodipine hypertension 5 mg once daily clinical guideline", "expected_medication": "amlodipine", "expected_kind": "prescription_guideline", "expected_relevance": true},
+  {"query": "Lisinopril hypertension initial dose monitoring clinical guideline", "expected_medication": "lisinopril", "expected_kind": "prescription_guideline", "expected_relevance": true},
+  {"query": "Warfarin INR bleeding monitoring clinical guideline", "expected_medication": "warfarin", "expected_kind": "prescription_guideline", "expected_relevance": true},
+  {"query": "Ibuprofen gastrointestinal bleeding warning clinical guideline", "expected_medication": "ibuprofen", "expected_kind": "prescription_guideline", "expected_relevance": true},
+  {"query": "Metformin aspirin interaction clinical reference", "expected_medication": "metformin", "expected_kind": "prescription_guideline", "expected_topic": "interaction", "expected_relevance": false},
+  {"query": "Unknownmedicine rare condition dosing clinical guideline", "expected_medication": "unknownmedicine", "expected_kind": "prescription_guideline", "expected_relevance": false},
+  {"query": "LOW_SPO2 observation guidance", "expected_medication": null, "expected_kind": "clinical_guideline", "expected_relevance": true}
+]

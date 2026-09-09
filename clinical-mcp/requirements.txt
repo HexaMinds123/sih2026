@@ -1,4 +1,4 @@
-mcp>=1.2.0,<2.0.0
+mcp>=1.2.0
 pymongo>=4.8.0
 numpy>=1.26.0
 sentence-transformers>=3.0.0

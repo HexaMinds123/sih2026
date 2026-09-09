@@ -5,7 +5,10 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from knowledge import KnowledgeStore, create_store_from_environment, normalize_anomaly_code, normalize_medication
 
@@ -56,7 +59,12 @@ def search_clinical_guidance(anomaly_code: str) -> dict[str, Any]:
     """Retrieve relevant clinical reference evidence for an observation code."""
     normalized_code = normalize_anomaly_code(anomaly_code)
     guidance = _get_store().find_guidance(normalized_code)
-    evidence = _get_store().search_guidance(normalized_code, limit=5)
+    rag_query = f"{normalized_code}: {guidance['observation']}" if guidance else normalized_code
+    evidence = _get_store().search_guidance(
+        rag_query,
+        limit=5,
+        metadata_filter={"kind": "clinical_guideline"},
+    )
     if guidance is None:
         return {
             "found": False,
@@ -75,5 +83,75 @@ def search_clinical_guidance(anomaly_code: str) -> dict[str, Any]:
     }
 
 
+@mcp.tool()
+def search_prescription_guidance(
+    medication: str,
+    condition: str | None = None,
+    dosage: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve existing clinical evidence relevant to a prescription medication."""
+    normalized_medication = normalize_medication(medication)
+    if condition is not None and (not isinstance(condition, str) or not condition.strip()):
+        raise ValueError("condition must be a non-empty string when provided")
+    if dosage is not None and (not isinstance(dosage, str) or not dosage.strip()):
+        raise ValueError("dosage must be a non-empty string when provided")
+
+    query_parts = [medication.strip()]
+    if condition:
+        query_parts.append(condition.strip())
+    if dosage:
+        query_parts.append(dosage.strip())
+    query = " ".join(query_parts) + " clinical guideline"
+    retrieved = _get_store().search_guidance(
+        query,
+        limit=5,
+        metadata_filter={"medication": normalized_medication, "kind": "prescription_guideline"},
+    )
+    evidence = []
+    for result in retrieved:
+        metadata = result.get("metadata") or {}
+        evidence.append({
+            "text": result.get("text"),
+            "source": result.get("source"),
+            "document_id": metadata.get("document_id"),
+            "section": metadata.get("section"),
+            "page": metadata.get("page"),
+            "version": metadata.get("version"),
+            "jurisdiction": metadata.get("jurisdiction"),
+            "publication_date": metadata.get("publication_date"),
+            "topic": metadata.get("topic"),
+            "source_url": metadata.get("source_url"),
+            "similarity_score": result.get("score"),
+        })
+
+    return {
+        "medication": normalized_medication,
+        "condition": condition.strip() if condition else None,
+        "dosage": dosage.strip() if dosage else None,
+        "evidence_found": bool(evidence),
+        "evidence": evidence,
+        "human_review_required": True,
+        "reason": None if evidence else "No sufficiently relevant clinical evidence found.",
+        "note": "Evidence is decision support only and requires human or clinician review.",
+    }
+
+
+@mcp.tool()
+def search_clinical_evidence(query: str, limit: int = 5) -> dict[str, Any]:
+    """Perform semantic RAG search across clinical reference guidance using natural language queries."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if limit < 1 or limit > 20:
+        raise ValueError("limit must be between 1 and 20")
+    evidence = _get_store().search_guidance(query.strip(), limit=limit)
+    return {
+        "query": query.strip(),
+        "count": len(evidence),
+        "evidence": evidence,
+        "note": "Results are retrieved reference evidence for clinical decision support and do not constitute a diagnosis.",
+    }
+
+
 if __name__ == "__main__":
+    _get_store()
     mcp.run(transport="stdio")
