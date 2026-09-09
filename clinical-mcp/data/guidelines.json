@@ -1,0 +1,12 @@
+{
+  "LOW_SPO2": {
+    "parameter": "SpO2",
+    "observation": "Low oxygen saturation detected",
+    "action": "Verify sensor reading and request clinician review"
+  },
+  "HIGH_HR": {
+    "parameter": "Heart Rate",
+    "observation": "Elevated heart rate detected",
+    "action": "Monitor persistence and seek clinical assessment"
+  }
+}

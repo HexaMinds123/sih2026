@@ -1,0 +1,10 @@
+{
+  "warfarin+aspirin": {
+    "severity": "high",
+    "warning": "May increase bleeding risk"
+  },
+  "amlodipine+simvastatin": {
+    "severity": "moderate",
+    "warning": "May increase simvastatin exposure"
+  }
+}
