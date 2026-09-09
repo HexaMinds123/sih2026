@@ -20,7 +20,12 @@ class KnowledgeStore(Protocol):
     def find_guidance(self, anomaly_code: str) -> dict[str, str] | None:
         ...
 
-    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    def search_guidance(
+        self,
+        query: str,
+        limit: int = 5,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         ...
 
 
@@ -86,6 +91,8 @@ class JsonKnowledgeStore:
         self._guidelines = _validate_guidelines(
             json.loads((directory / "guidelines.json").read_text(encoding="utf-8"))
         )
+        prescription_path = directory / "prescription_guidelines.json"
+        self._prescription_guidelines = json.loads(prescription_path.read_text(encoding="utf-8")) if prescription_path.exists() else []
 
     def find_interaction(self, first_medication: str, second_medication: str) -> dict[str, str] | None:
         return self._interactions.get(interaction_key(first_medication, second_medication))
@@ -93,14 +100,47 @@ class JsonKnowledgeStore:
     def find_guidance(self, anomaly_code: str) -> dict[str, str] | None:
         return self._guidelines.get(normalize_anomaly_code(anomaly_code))
 
-    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    def search_guidance(
+        self,
+        query: str,
+        limit: int = 5,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         normalized_query = query.strip().lower()
-        matches = []
+        matches: list[dict[str, Any]] = []
         for code, record in self._guidelines.items():
             text = " ".join((code, record["parameter"], record["observation"], record["action"])).lower()
             if normalized_query in text:
                 matches.append({"text": text, "score": 1.0, "source": f"guidelines.json:{code}", "metadata": {"anomaly_code": code}})
-        return matches[:limit]
+        if not metadata_filter or metadata_filter.get("kind") != "prescription_guideline":
+            return sorted(matches, key=lambda result: result["score"], reverse=True)[:limit]
+        for record in self._prescription_guidelines:
+            metadata = {
+                "document_id": record["document_id"],
+                "section": record["section"],
+                "page": record["page"],
+                "version": record["version"],
+                "jurisdiction": record["jurisdiction"],
+                "publication_date": record["publication_date"],
+                "medication": record["medication"],
+                "condition": record["condition"],
+                "topic": record["topic"],
+                "source_url": record["source_url"],
+                "kind": "prescription_guideline",
+            }
+            if metadata_filter and any(metadata.get(key) != value for key, value in metadata_filter.items()):
+                continue
+            terms = [term for term in re.findall(r"[a-z0-9]+", normalized_query) if len(term) > 2]
+            searchable = f"{record['medication']} {record.get('condition') or ''} {record['topic']} {record['text']}".lower()
+            overlap = sum(term in searchable for term in terms)
+            if overlap:
+                matches.append({
+                    "text": record["text"],
+                    "score": round(overlap / max(len(set(terms)), 1), 4),
+                    "source": record["source"],
+                    "metadata": metadata,
+                })
+        return sorted(matches, key=lambda result: result["score"], reverse=True)[:limit]
 
 
 class MongoKnowledgeStore:
@@ -117,7 +157,9 @@ class MongoKnowledgeStore:
         self._interactions = self._database[interaction_collection]
         self._guidelines = self._database[guideline_collection]
         self._client.admin.command("ping")
-        self._rag_store = None
+        from rag import MongoRAGStore
+
+        self._rag_store = MongoRAGStore(self._client, self._database.name)
 
     def find_interaction(self, first_medication: str, second_medication: str) -> dict[str, str] | None:
         record = self._interactions.find_one({"_key": interaction_key(first_medication, second_medication)}, {"_id": 0})
@@ -135,12 +177,13 @@ class MongoKnowledgeStore:
             "action": str(record["action"]),
         }
 
-    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        if self._rag_store is None:
-            from rag import MongoRAGStore
-
-            self._rag_store = MongoRAGStore(self._client, self._database.name)
-        return [result.__dict__ for result in self._rag_store.search(query, limit=limit)]
+    def search_guidance(
+        self,
+        query: str,
+        limit: int = 5,
+        metadata_filter: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        return [result.__dict__ for result in self._rag_store.search(query, limit=limit, metadata_filter=metadata_filter)]
 
 
 def create_store_from_environment() -> KnowledgeStore:

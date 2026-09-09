@@ -1,6 +1,8 @@
 import numpy as np
+import sys
+import types
 
-from rag import MongoRAGStore, chunk_text
+from rag import EmbeddingModel, MongoRAGStore, chunk_text
 
 
 class FakeEmbeddingModel:
@@ -56,3 +58,28 @@ def test_mongo_rag_upserts_and_retrieves_relevant_chunks():
     assert len(results) == 1
     assert results[0].source == "guideline.txt"
     assert np.isclose(results[0].score, 1.0)
+
+
+def test_embedding_model_is_constructed_once_per_process(monkeypatch):
+    constructions = []
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name):
+            constructions.append(model_name)
+
+        def encode(self, text, normalize_embeddings=True):
+            return [1.0, 0.0]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
+    )
+    EmbeddingModel._models.clear()
+
+    first = EmbeddingModel("test-model")
+    second = EmbeddingModel("test-model")
+
+    assert first.encode("one") == [1.0, 0.0]
+    assert second.encode("two") == [1.0, 0.0]
+    assert constructions == ["test-model"]
