@@ -98,6 +98,7 @@ Keep the Mongo environment variables available to the MCP client, or place them 
 
 - `query_drug_interactions(meds_list)` checks every medication pair against the curated interaction collection and returns structured severity and warning fields.
 - `search_clinical_guidance(anomaly_code)` returns observation context, a recommended verification or clinical-review action, and ranked source evidence retrieved from MongoDB embeddings.
+- `search_prescription_guidance(medication, condition, dosage)` retrieves clinical guideline evidence and U.S. DailyMed / FDA label provenance for a specific medication and clinical condition.
 
 Example inputs:
 
@@ -109,7 +110,11 @@ Example inputs:
 {"anomaly_code": "LOW_SPO2"}
 ```
 
-The guidance response includes the anomaly code, parameter, observation, recommended action, evidence text, similarity score, and source metadata.
+```json
+{"medication": "Metformin", "condition": "Type 2 Diabetes", "dosage": "500 mg twice daily"}
+```
+
+The guidance response includes the anomaly code or medication, observation/indication, recommended action, evidence text, similarity score, and source DailyMed metadata.
 
 Unknown records are reported as unknown. The server does not infer interactions, identify diseases, assert that a patient has a condition, or generate a diagnosis from retrieved text.
 
