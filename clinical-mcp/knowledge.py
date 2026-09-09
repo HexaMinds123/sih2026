@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any, Protocol
 
+from dotenv import load_dotenv
+
 _PAIR_SEPARATOR = "+"
 
 
@@ -16,6 +18,9 @@ class KnowledgeStore(Protocol):
         ...
 
     def find_guidance(self, anomaly_code: str) -> dict[str, str] | None:
+        ...
+
+    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         ...
 
 
@@ -88,6 +93,15 @@ class JsonKnowledgeStore:
     def find_guidance(self, anomaly_code: str) -> dict[str, str] | None:
         return self._guidelines.get(normalize_anomaly_code(anomaly_code))
 
+    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        normalized_query = query.strip().lower()
+        matches = []
+        for code, record in self._guidelines.items():
+            text = " ".join((code, record["parameter"], record["observation"], record["action"])).lower()
+            if normalized_query in text:
+                matches.append({"text": text, "score": 1.0, "source": f"guidelines.json:{code}", "metadata": {"anomaly_code": code}})
+        return matches[:limit]
+
 
 class MongoKnowledgeStore:
     """MongoDB-backed store using separate collections for reference knowledge."""
@@ -103,6 +117,7 @@ class MongoKnowledgeStore:
         self._interactions = self._database[interaction_collection]
         self._guidelines = self._database[guideline_collection]
         self._client.admin.command("ping")
+        self._rag_store = None
 
     def find_interaction(self, first_medication: str, second_medication: str) -> dict[str, str] | None:
         record = self._interactions.find_one({"_key": interaction_key(first_medication, second_medication)}, {"_id": 0})
@@ -120,8 +135,16 @@ class MongoKnowledgeStore:
             "action": str(record["action"]),
         }
 
+    def search_guidance(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        if self._rag_store is None:
+            from rag import MongoRAGStore
+
+            self._rag_store = MongoRAGStore(self._client, self._database.name)
+        return [result.__dict__ for result in self._rag_store.search(query, limit=limit)]
+
 
 def create_store_from_environment() -> KnowledgeStore:
+    load_dotenv(Path(__file__).parent / ".env", override=False)
     backend = os.getenv("CLINICAL_MCP_STORAGE", "json").strip().lower()
     if backend == "json":
         return JsonKnowledgeStore()

@@ -1,9 +1,12 @@
+import os
+
 import pytest
 
 import server
 
 
 def setup_function():
+    os.environ["CLINICAL_MCP_STORAGE"] = "json"
     server._store = None
 
 
@@ -22,11 +25,9 @@ def test_query_requires_two_distinct_medications():
 
 def test_unknown_guidance_is_structured():
     result = server.search_clinical_guidance("not_known")
-    assert result == {
-        "found": False,
-        "anomaly_code": "NOT_KNOWN",
-        "message": "No curated guidance was found for this observation code.",
-    }
+    assert result["found"] is False
+    assert result["anomaly_code"] == "NOT_KNOWN"
+    assert result["evidence"] == []
 
 
 def test_guidance_is_observation_based():

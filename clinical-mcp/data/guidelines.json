@@ -8,5 +8,35 @@
     "parameter": "Heart Rate",
     "observation": "Elevated heart rate detected",
     "action": "Monitor persistence and seek clinical assessment"
+  },
+  "LOW_BP": {
+    "parameter": "Blood Pressure",
+    "observation": "Blood pressure is below the configured observation threshold",
+    "action": "Repeat the measurement, assess for symptoms, and request clinician review"
+  },
+  "HIGH_TEMP": {
+    "parameter": "Temperature",
+    "observation": "Temperature is above the configured observation threshold",
+    "action": "Repeat the measurement, review symptoms, and seek clinical assessment if persistent"
+  },
+  "LOW_GLUCOSE": {
+    "parameter": "Blood Glucose",
+    "observation": "Blood glucose is below the configured observation threshold",
+    "action": "Verify the measurement and follow the applicable clinical protocol or request urgent clinician guidance"
+  },
+  "HIGH_RESP_RATE": {
+    "parameter": "Respiratory Rate",
+    "observation": "Respiratory rate is above the configured observation threshold",
+    "action": "Repeat the measurement, assess the patient promptly, and request clinician review"
+  },
+  "LOW_HR": {
+    "parameter": "Heart Rate",
+    "observation": "Heart rate is below the configured observation threshold",
+    "action": "Verify the reading, assess for symptoms, and request clinical assessment"
+  },
+  "HIGH_BP": {
+    "parameter": "Blood Pressure",
+    "observation": "Blood pressure is above the configured observation threshold",
+    "action": "Repeat the measurement using correct technique and request clinician review, especially if symptoms are present"
   }
 }

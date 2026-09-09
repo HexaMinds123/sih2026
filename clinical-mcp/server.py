@@ -53,14 +53,16 @@ def query_drug_interactions(meds_list: list[str]) -> dict[str, Any]:
 
 @mcp.tool()
 def search_clinical_guidance(anomaly_code: str) -> dict[str, Any]:
-    """Return observation guidance for a curated anomaly code."""
+    """Retrieve relevant clinical reference evidence for an observation code."""
     normalized_code = normalize_anomaly_code(anomaly_code)
     guidance = _get_store().find_guidance(normalized_code)
+    evidence = _get_store().search_guidance(normalized_code, limit=5)
     if guidance is None:
         return {
             "found": False,
             "anomaly_code": normalized_code,
             "message": "No curated guidance was found for this observation code.",
+            "evidence": evidence,
         }
     return {
         "found": True,
@@ -68,6 +70,7 @@ def search_clinical_guidance(anomaly_code: str) -> dict[str, Any]:
         "parameter": guidance["parameter"],
         "observation": guidance["observation"],
         "recommended_action": guidance["action"],
+        "evidence": evidence,
         "note": "This is observation-based decision support, not an automatic diagnosis.",
     }
 

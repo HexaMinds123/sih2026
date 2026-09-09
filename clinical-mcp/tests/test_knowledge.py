@@ -26,6 +26,12 @@ def test_guideline_lookup_is_case_insensitive():
     assert JsonKnowledgeStore().find_guidance("low_spo2")["parameter"] == "SpO2"
 
 
+def test_expanded_reference_records_are_available():
+    store = JsonKnowledgeStore()
+    assert store.find_interaction("apixaban", "ibuprofen")["severity"] == "high"
+    assert store.find_guidance("LOW_GLUCOSE")["parameter"] == "Blood Glucose"
+
+
 def test_invalid_interaction_data_is_rejected(tmp_path):
     (tmp_path / "drug_interactions.json").write_text(json.dumps({"bad": {}}), encoding="utf-8")
     (tmp_path / "guidelines.json").write_text("{}", encoding="utf-8")

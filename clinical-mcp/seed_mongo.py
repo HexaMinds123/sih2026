@@ -6,15 +6,21 @@ import json
 import os
 from pathlib import Path
 
-from pymongo import MongoClient
+from dotenv import load_dotenv
 
 from knowledge import interaction_key, normalize_anomaly_code
+from rag import MongoRAGStore
 
 
 DATA_DIRECTORY = Path(__file__).parent / "data"
 
 
 def seed() -> None:
+    try:
+        from pymongo import MongoClient
+    except ImportError as error:
+        raise RuntimeError("MongoDB seeding requires the pymongo package") from error
+    load_dotenv(Path(__file__).parent / ".env", override=False)
     uri = os.getenv("MONGO_URI")
     if not uri:
         raise RuntimeError("MONGO_URI is required")
@@ -58,6 +64,16 @@ def seed() -> None:
         guideline_collection.insert_many(guideline_documents)
     interaction_collection.create_index("_key", unique=True)
     guideline_collection.create_index("_code", unique=True)
+    rag_store = MongoRAGStore(client, database_name)
+    for code, record in guidelines.items():
+        rag_store.upsert_document(
+            source=f"guidelines.json:{normalize_anomaly_code(code)}",
+            text=(
+                f"Anomaly code: {normalize_anomaly_code(code)}. Parameter: {record['parameter']}. "
+                f"Observation: {record['observation']}. Recommended action: {record['action']}."
+            ),
+            metadata={"anomaly_code": normalize_anomaly_code(code), "kind": "clinical_guideline"},
+        )
     print(f"Seeded {len(interaction_documents)} interactions and {len(guideline_documents)} guidelines into {database_name}")
 
 
