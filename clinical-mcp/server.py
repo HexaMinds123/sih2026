@@ -5,7 +5,10 @@ from __future__ import annotations
 from itertools import combinations
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 from knowledge import KnowledgeStore, create_store_from_environment, normalize_anomaly_code, normalize_medication
 
@@ -56,8 +59,9 @@ def search_clinical_guidance(anomaly_code: str) -> dict[str, Any]:
     """Retrieve relevant clinical reference evidence for an observation code."""
     normalized_code = normalize_anomaly_code(anomaly_code)
     guidance = _get_store().find_guidance(normalized_code)
+    rag_query = f"{normalized_code}: {guidance['observation']}" if guidance else normalized_code
     evidence = _get_store().search_guidance(
-        normalized_code,
+        rag_query,
         limit=5,
         metadata_filter={"kind": "clinical_guideline"},
     )
@@ -129,6 +133,22 @@ def search_prescription_guidance(
         "human_review_required": True,
         "reason": None if evidence else "No sufficiently relevant clinical evidence found.",
         "note": "Evidence is decision support only and requires human or clinician review.",
+    }
+
+
+@mcp.tool()
+def search_clinical_evidence(query: str, limit: int = 5) -> dict[str, Any]:
+    """Perform semantic RAG search across clinical reference guidance using natural language queries."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if limit < 1 or limit > 20:
+        raise ValueError("limit must be between 1 and 20")
+    evidence = _get_store().search_guidance(query.strip(), limit=limit)
+    return {
+        "query": query.strip(),
+        "count": len(evidence),
+        "evidence": evidence,
+        "note": "Results are retrieved reference evidence for clinical decision support and do not constitute a diagnosis.",
     }
 
 
