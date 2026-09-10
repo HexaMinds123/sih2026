@@ -6,14 +6,20 @@ Coordinates the three independent MCP servers:
 2. Clinical-MCP: Retrieves evidence-based clinical guidelines and drug interaction matrices.
 3. Notification-MCP: Handles audit logging, human confirmation gates, and SMS dispatches.
 
+Also integrates the Medical & Pharmaceutical Agent (prescription-system) via
+MedicalAgentAdapter for deterministic prescription analysis.
+
 SAFETY ARCHITECTURE:
 - Risk evaluation is performed here in the Orchestrator.
 - Notification-MCP never decides if an emergency exists.
 - Real-world external communication is blocked until an attending clinician explicitly confirms.
+- INFORMATIONAL prescriptions are never auto-approved (approved=False always; Safety Invariant #3).
+- All statuses require human_review_required=True through evaluate_prescription().
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import json
@@ -46,15 +52,224 @@ _notification = _load_server_module("orchestrator_notification", ROOT / "notific
 
 DEFAULT_TOKEN = os.getenv("AGENT_API_TOKEN", "medical-agent-secret-token")
 
+# ---------------------------------------------------------------------------
+# Structured degradation dict returned when the adapter is unavailable or
+# when analyze_prescription raises any unhandled exception.
+# ---------------------------------------------------------------------------
+_DEGRADED = {
+    "available": False,
+    "status": "INSUFFICIENT_INFORMATION",
+    "human_review_required": True,
+    "issues": [],
+    "drug_interactions": {"interaction_found": False, "interactions": []},
+    "medications": [],
+}
+
+
+class MedicalAgentAdapter:
+    """
+    Thin integration boundary between HealthcareOrchestrator and the
+    Medical & Pharmaceutical Agent (prescription-system/app/medical_agent.py).
+
+    Responsibilities:
+    - Safe import of analyze_prescription and Pydantic models from the
+      prescription-system package, without polluting sys.modules globally.
+    - Sync/async bridging: analyze_prescription is async; this adapter
+      exposes a synchronous run() usable from non-async orchestrator code.
+    - Input polymorphism: accepts ExtractionResponse, dict, or keyword args.
+    - Graceful degradation: any import error or runtime exception is caught
+      and returned as a structured dict (never re-raised to the caller).
+    """
+
+    def __init__(self) -> None:
+        self.available = False
+        self._analyze_prescription = None
+        self._ExtractionResponse = None
+        self._AnalysisResponse = None
+        self._Medication = None
+        self._Patient = None
+        self._Prescription = None
+        self._OCRResult = None
+        self._import_error: str = ""
+
+        _rx_root = ROOT / "prescription-system"
+        _rx_str = str(_rx_root)
+
+        try:
+            # Inject prescription-system into sys.path if not already present
+            # so that `from app.xxx import ...` resolves correctly.
+            if _rx_str not in sys.path:
+                sys.path.insert(0, _rx_str)
+
+            from app.medical_agent import analyze_prescription  # noqa: PLC0415
+            from app.models import (  # noqa: PLC0415
+                AnalysisResponse,
+                ExtractionResponse,
+                Medication,
+                OCRResult,
+                Patient,
+                Prescription,
+            )
+
+            self._analyze_prescription = analyze_prescription
+            self._ExtractionResponse = ExtractionResponse
+            self._AnalysisResponse = AnalysisResponse
+            self._Medication = Medication
+            self._Patient = Patient
+            self._Prescription = Prescription
+            self._OCRResult = OCRResult
+            self.available = True
+
+        except Exception as exc:  # pylint: disable=broad-except
+            self._import_error = str(exc)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _degraded(self, reason: str) -> Dict[str, Any]:
+        """Return a copy of the degradation dict with the supplied reason appended."""
+        result = dict(_DEGRADED)
+        result["issues"] = [reason]
+        return result
+
+    def _build_extraction(self, **kwargs) -> Any:
+        """
+        Build an ExtractionResponse from keyword arguments when the caller
+        supplies raw prescription parameters instead of a model instance.
+
+        Supported kwargs: prescription_id, medications (list of dicts),
+        condition, patient_name, patient_age, patient_gender.
+        """
+        ExtractionResponse = self._ExtractionResponse
+        Medication = self._Medication
+        Patient = self._Patient
+        Prescription = self._Prescription
+        OCRResult = self._OCRResult
+
+        prescription_id = kwargs.get("prescription_id", "RX-UNKNOWN")
+        condition = kwargs.get("condition")
+        raw_meds = kwargs.get("medications", [])
+
+        meds = []
+        for m in raw_meds:
+            if isinstance(m, dict):
+                meds.append(Medication(**{k: v for k, v in m.items() if k in Medication.model_fields}))
+            elif isinstance(m, self._Medication):
+                meds.append(m)
+
+        patient = Patient(
+            name=kwargs.get("patient_name"),
+            age=kwargs.get("patient_age"),
+            gender=kwargs.get("patient_gender"),
+        )
+        prescription = Prescription(
+            patient=patient,
+            condition=condition,
+            medications=meds,
+        )
+        ocr = OCRResult(raw_text="", human_verification_required=False)
+        return ExtractionResponse(
+            prescription_id=prescription_id,
+            ocr=ocr,
+            prescription=prescription,
+            human_verification_required=False,
+        )
+
+    def _run_async(self, extraction: Any) -> Any:
+        """
+        Execute analyze_prescription(extraction) bridging sync → async.
+        Execute analyze_prescription(extraction) bridging sync -> async.
+
+        Strategy:
+        - If no running event loop: use asyncio.run() (standard path).
+        - If a loop IS running (e.g., inside FastAPI or an async test):
+          submit to a fresh ThreadPoolExecutor thread that owns its own
+          event loop, avoiding 'This event loop is already running'.
+        asyncio.get_running_loop() raises RuntimeError when there is NO running
+        loop. So:
+          - RuntimeError caught  => no loop running  => asyncio.run() is safe.
+          - No exception         => loop IS running   => must delegate to a thread
+            that owns its own loop to avoid "This event loop is already running".
+
+        IMPORTANT: the coroutine must be created *inside* the worker thread
+        (via the lambda), not in the calling thread, to avoid cross-thread
+        coroutine sharing which is unsafe in CPython's asyncio.
+        """
+        coro_factory = lambda: self._analyze_prescription(extraction)  # noqa: E731
+
+        try:
+            asyncio.get_running_loop()
+            # A loop is already running — delegate to a thread with its own loop.
+            # Loop is running (e.g. FastAPI, async pytest) — use a thread.
+            import concurrent.futures  # noqa: PLC0415
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, coro_factory())
+                future = pool.submit(
+                    lambda: asyncio.run(self._analyze_prescription(extraction))
+                )
+                return future.result()
+        except RuntimeError:
+            # No running loop — safe to call asyncio.run() directly.
+            return asyncio.run(coro_factory())
+            # No running loop — standard sync call path.
+            return asyncio.run(self._analyze_prescription(extraction))
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run(self, extraction: Any = None, **kwargs) -> Any:
+        """
+        Invoke the Medical Agent and return an AnalysisResponse (or the
+        structured degradation dict if unavailable or on any error).
+
+        Args:
+            extraction: ExtractionResponse instance, a dict to be validated
+                        via ExtractionResponse.model_validate(), or None when
+                        keyword prescription params are supplied instead.
+            **kwargs:   Keyword prescription params forwarded to _build_extraction()
+                        when extraction is None (e.g. medications=[], condition=...).
+
+        Returns:
+            AnalysisResponse on success; degradation dict on failure.
+        """
+        if not self.available:
+            return self._degraded(
+                f"Medical Agent unavailable (import failed: {self._import_error})"
+            )
+
+        try:
+            # --- Input normalisation ---
+            if extraction is None:
+                extraction = self._build_extraction(**kwargs)
+            elif isinstance(extraction, dict):
+                extraction = self._ExtractionResponse.model_validate(extraction)
+            # else: already an ExtractionResponse — pass through
+
+            return self._run_async(extraction)
+
+        except Exception as exc:  # pylint: disable=broad-except
+            return self._degraded(f"Medical Agent execution error: {exc}")
+
 
 class HealthcareOrchestrator:
-    """Central AI Clinical Agent orchestrating EHR, Clinical Guidelines, and Notification MCP servers."""
+    """
+    Central AI Clinical Agent orchestrating EHR, Clinical Guidelines, and Notification MCP servers.
+
+    Methods:
+    - process_telemetry(): Evaluate wearable vital signs across all MCP servers.
+    - evaluate_prescription(): Delegate to Medical Agent, synthesise risk, enrich with EHR
+      context, and log audit trail to Notification MCP.
+    - doctor_decision(): Execute human clinician CONFIRM / REJECT gate.
+    """
 
     def __init__(self, api_token: str = DEFAULT_TOKEN):
         self.api_token = api_token
         self.ehr = _ehr
         self.clinical = _clinical
         self.notification = _notification
+        self.medical_agent = MedicalAgentAdapter()
 
     def detect_anomalies(self, vitals: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Detect clinical anomalies from vital signs stream."""
@@ -215,6 +430,123 @@ class HealthcareOrchestrator:
             "clinical_guidelines": guidelines_applied,
             "drug_interactions": interactions_found,
             "escalation_message": event_message
+        }
+
+    def evaluate_prescription(
+        self,
+        extraction: Any,
+        patient_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate a prescription through the Medical & Pharmaceutical Agent and
+        synthesise a unified risk assessment.
+
+        Steps:
+        1. Delegate to MedicalAgentAdapter.run(extraction) → AnalysisResponse.
+        2. Map AnalysisResponse.status → risk_level and human_review_required.
+        3. If patient_id supplied: enrich result with EHR patient context.
+        4. If risk_level in ("CRITICAL", "HIGH"): log audit trail to Notification MCP.
+        5. Return unified assessment dict.
+
+        Safety Invariants preserved:
+        - approved is ALWAYS False — no prescription is auto-approved.
+        - human_review_required is ALWAYS True for all statuses.
+        - INFORMATIONAL does NOT mean safe-to-dispense (Safety Invariant #3).
+
+        Args:
+            extraction: ExtractionResponse, dict, or keyword args understood by
+                        MedicalAgentAdapter.run().
+            patient_id: Optional patient identifier for EHR context enrichment.
+
+        Returns:
+            Unified assessment dict with risk_level, status, approved, event_id, etc.
+        """
+        # Step 1: Invoke Medical Agent
+        analysis = self.medical_agent.run(extraction)
+
+        # Normalise to plain dict (AnalysisResponse is a Pydantic model)
+        if hasattr(analysis, "model_dump"):
+            analysis_dict = analysis.model_dump()
+        elif isinstance(analysis, dict):
+            analysis_dict = analysis
+        else:
+            analysis_dict = dict(analysis)
+
+        # Step 2: Status → risk_level mapping
+        ma_status = analysis_dict.get("status", "INSUFFICIENT_INFORMATION")
+        _STATUS_MAP: Dict[str, tuple] = {
+            "CRITICAL_REVIEW_REQUIRED": ("CRITICAL", True),
+            "REVIEW_REQUIRED":          ("HIGH",     True),
+            "INSUFFICIENT_INFORMATION": ("HIGH",     True),
+            "INFORMATIONAL":            ("MODERATE", True),  # Safety Invariant #3: never auto-approved
+        }
+        risk_level, requires_human_confirmation = _STATUS_MAP.get(
+            ma_status, ("HIGH", True)
+        )
+
+        prescription_id = analysis_dict.get("prescription_id", "UNKNOWN")
+
+        # Step 3: Optional EHR context enrichment
+        patient_context: Dict[str, Any] = {}
+        if patient_id:
+            try:
+                profile = self.ehr.patient_profile(patient_id)
+                if not profile.get("error"):
+                    patient_context["name"] = profile.get("name")
+                    patient_context["age"] = profile.get("age")
+                    patient_context["gender"] = profile.get("gender")
+                    patient_context["conditions"] = profile.get("conditions", [])
+                    patient_context["ehr_allergies"] = profile.get("allergies", [])
+            except Exception:  # pylint: disable=broad-except
+                pass  # EHR unavailable — degrade gracefully; don't fail prescription eval
+
+            try:
+                allergy_res = self.ehr.get_allergies(patient_id, self.api_token)
+                if not allergy_res.get("error"):
+                    patient_context["allergies"] = allergy_res.get("allergies", [])
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+        # Step 4: Audit trail for CRITICAL / HIGH risk
+        event_id: Optional[str] = None
+        if risk_level in ("CRITICAL", "HIGH"):
+            try:
+                issues_summary = "; ".join(analysis_dict.get("issues", [])) or "No issues listed"
+                audit_event = self.notification.log_audit_trail(
+                    patient_id=patient_id or "UNKNOWN",
+                    event_type="PRESCRIPTION_REVIEW",
+                    risk_level=risk_level,
+                    message=(
+                        f"Prescription {prescription_id} requires {risk_level} review. "
+                        f"Status: {ma_status}. Issues: {issues_summary}"
+                    ),
+                    phone="",
+                    event_state={
+                        "risk": risk_level,
+                        "prescription_id": prescription_id,
+                        "status": ma_status,
+                        "issues": analysis_dict.get("issues", []),
+                        "drug_interactions": analysis_dict.get("drug_interactions", {}),
+                    },
+                )
+                event_id = audit_event.get("event_id")
+            except Exception:  # pylint: disable=broad-except
+                pass  # Notification MCP unavailable — degrade gracefully
+
+        # Step 5: Return unified assessment
+        return {
+            "patient_id": patient_id,
+            "prescription_id": prescription_id,
+            "risk_level": risk_level,
+            "status": "PENDING_CONFIRMATION",
+            "approved": False,                        # Safety Invariant #3
+            "human_review_required": True,            # Always True
+            "requires_human_confirmation": requires_human_confirmation,
+            "medical_analysis": analysis_dict,
+            "issues": analysis_dict.get("issues", []),
+            "drug_interactions": analysis_dict.get("drug_interactions", {}),
+            "patient_context": patient_context,
+            "event_id": event_id,
         }
 
     def doctor_decision(
