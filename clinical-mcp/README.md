@@ -110,6 +110,7 @@ Example inputs:
 {"anomaly_code": "LOW_SPO2"}
 ```
 
+The guidance response includes the anomaly code, parameter, observation, recommended action, evidence text, similarity score, and source metadata.
 ```json
 {"medication": "Metformin", "condition": "Type 2 Diabetes", "dosage": "500 mg twice daily"}
 ```
