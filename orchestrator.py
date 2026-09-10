@@ -6,20 +6,32 @@ Coordinates the three independent MCP servers:
 2. Clinical-MCP: Retrieves evidence-based clinical guidelines and drug interaction matrices.
 3. Notification-MCP: Handles audit logging, human confirmation gates, and SMS dispatches.
 
+Additionally integrates the downstream Medical & Pharmaceutical Agent:
+4. Medical Agent: Deterministic prescription analysis via ClinicalMCPClient (stdio transport).
+   Receives ExtractionResponse, returns AnalysisResponse. Never an orchestrator.
+
 SAFETY ARCHITECTURE:
 - Risk evaluation is performed here in the Orchestrator.
 - Notification-MCP never decides if an emergency exists.
 - Real-world external communication is blocked until an attending clinician explicitly confirms.
+- INFORMATIONAL status from the Medical Agent is NEVER interpreted as approved or safe.
+  All prescription analyses require explicit human clinician confirmation.
+- If the Medical Agent is unavailable, the Orchestrator degrades gracefully:
+  available=False, status=INSUFFICIENT_INFORMATION, human_review_required=True.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import sys
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,14 +59,277 @@ _notification = _load_server_module("orchestrator_notification", ROOT / "notific
 DEFAULT_TOKEN = os.getenv("AGENT_API_TOKEN", "medical-agent-secret-token")
 
 
+# ---------------------------------------------------------------------------
+# Medical Agent Adapter
+# ---------------------------------------------------------------------------
+
+def _import_medical_agent():
+    """
+    Safely resolve and import the prescription-system Medical Agent module.
+
+    Adds prescription-system/ to sys.path so ``app`` is a resolvable package,
+    then imports ``app.medical_agent.analyze_prescription`` and the
+    ``app.models.ExtractionResponse`` / ``AnalysisResponse`` classes.
+
+    Returns a tuple (analyze_fn, ExtractionResponse, AnalysisResponse)
+    or raises ImportError with a descriptive message if unavailable.
+    """
+    import importlib
+
+    rx_system_root = ROOT / "prescription-system"
+    pkg_str = str(rx_system_root)
+    if pkg_str not in sys.path:
+        sys.path.insert(0, pkg_str)
+
+    try:
+        ma = importlib.import_module("app.medical_agent")
+        models = importlib.import_module("app.models")
+        return (
+            ma.analyze_prescription,
+            models.ExtractionResponse,
+            models.AnalysisResponse,
+        )
+    except Exception as exc:
+        raise ImportError(
+            f"Cannot import Medical & Pharmaceutical Agent: {exc}"
+        ) from exc
+
+
+class MedicalAgentAdapter:
+    """Adapter that bridges the async Medical & Pharmaceutical Agent with the
+    synchronous HealthcareOrchestrator.
+
+    Responsibilities
+    ----------------
+    - **Safe import**: degrades gracefully if the prescription-system package is
+      missing or any dependency is unavailable.
+    - **Input normalization**: accepts ``ExtractionResponse`` instances or dicts.
+    - **Sync/async bridge**: executes the async ``analyze_prescription`` coroutine
+      safely regardless of whether an event loop is already running.
+    - **Error isolation**: any failure returns a structured degradation dict so
+      the Orchestrator never crashes and never fabricates clinical evidence.
+
+    SAFETY INVARIANTS
+    -----------------
+    - ``human_review_required`` is always ``True`` — even on failure.
+    - ``approved`` is always ``False`` — approval is the clinician's gate.
+    - ``available: False`` is set explicitly on any import or runtime failure.
+    """
+
+    # Status strings produced by the Medical Agent
+    _CRITICAL = "CRITICAL_REVIEW_REQUIRED"
+    _REVIEW = "REVIEW_REQUIRED"
+    _INSUFFICIENT = "INSUFFICIENT_INFORMATION"
+    _INFORMATIONAL = "INFORMATIONAL"
+
+    # Map Medical Agent status → Orchestrator risk level
+    # Safety Invariant: INFORMATIONAL maps to MODERATE, not safe/approved.
+    _RISK_MAP: Dict[str, str] = {
+        _CRITICAL: "CRITICAL",
+        _REVIEW: "HIGH",
+        _INSUFFICIENT: "HIGH",
+        _INFORMATIONAL: "MODERATE",
+    }
+
+    def __init__(self) -> None:
+        self._available: Optional[bool] = None  # lazily determined on first call
+        self._analyze_fn = None
+        self._ExtractionResponse = None
+        self._AnalysisResponse = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _ensure_loaded(self) -> bool:
+        """Try to import the Medical Agent on first use. Returns True if available."""
+        if self._available is not None:
+            return self._available
+        try:
+            (
+                self._analyze_fn,
+                self._ExtractionResponse,
+                self._AnalysisResponse,
+            ) = _import_medical_agent()
+            self._available = True
+        except ImportError as exc:
+            logger.warning("MedicalAgentAdapter: import failed — %s", exc)
+            self._available = False
+        return self._available
+
+    @staticmethod
+    def _run_coroutine(coro) -> Any:
+        """Execute an asyncio coroutine from synchronous code.
+
+        Compatible with both standalone scripts (no running loop) and
+        environments with a running event loop (e.g. pytest-asyncio, FastAPI,
+        Jupyter) by delegating to a separate thread in the latter case.
+        """
+        try:
+            asyncio.get_running_loop()
+            running = True
+        except RuntimeError:
+            running = False
+
+        if not running:
+            return asyncio.run(coro)
+
+        # A loop is already running — spin up a thread so we don't block it.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=120)
+
+    def _to_extraction(self, extraction: Any, prescription_id: str = "RX-ORCHESTRATOR") -> Any:
+        """Normalize input to an ExtractionResponse instance.
+
+        Accepts:
+        - An existing ``ExtractionResponse`` object (pass-through).
+        - A dict validated via Pydantic ``model_validate``.
+        """
+        if isinstance(extraction, self._ExtractionResponse):
+            return extraction
+        if isinstance(extraction, dict):
+            return self._ExtractionResponse.model_validate({
+                "prescription_id": extraction.get("prescription_id", prescription_id),
+                "ocr": extraction.get("ocr", {
+                    "raw_text": extraction.get("raw_text", ""),
+                    "human_verification_required": extraction.get(
+                        "human_verification_required", True
+                    ),
+                }),
+                "prescription": extraction.get("prescription", {
+                    "patient": extraction.get("patient", {}),
+                    "medications": extraction.get("medications", []),
+                    "condition": extraction.get("condition"),
+                }),
+                "human_verification_required": extraction.get(
+                    "human_verification_required", True
+                ),
+            })
+        raise TypeError(
+            f"extraction must be ExtractionResponse or dict, got {type(extraction).__name__!r}"
+        )
+
+    @staticmethod
+    def _build_degraded_response(
+        prescription_id: str,
+        error_msg: str,
+    ) -> Dict[str, Any]:
+        """Return a structured failure dict the Orchestrator can safely consume."""
+        return {
+            "available": False,
+            "prescription_id": prescription_id,
+            "status": "INSUFFICIENT_INFORMATION",
+            "risk_level": "HIGH",
+            "human_review_required": True,
+            "approved": False,
+            "medications": [],
+            "drug_interactions": {"interaction_found": False, "interactions": []},
+            "issues": [error_msg],
+            "audit": {"tools_called": []},
+            "error": error_msg,
+        }
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+
+    def run(self, extraction: Any, prescription_id: str = "RX-ORCHESTRATOR") -> Dict[str, Any]:
+        """Run the Medical & Pharmaceutical Agent on a prescription extraction.
+
+        Parameters
+        ----------
+        extraction:
+            Either an ``ExtractionResponse`` instance or a dict following that
+            schema (e.g., built by the Orchestrator from OCR output).
+        prescription_id:
+            Fallback ID used when the extraction dict carries none.
+
+        Returns
+        -------
+        dict with keys:
+            available             bool  — False if the Medical Agent could not run
+            prescription_id       str
+            status                str   — CRITICAL_REVIEW_REQUIRED | REVIEW_REQUIRED |
+                                          INSUFFICIENT_INFORMATION | INFORMATIONAL
+            risk_level            str   — CRITICAL | HIGH | MODERATE
+            human_review_required bool  — always True (safety invariant)
+            approved              bool  — always False (clinician gate)
+            medications           list
+            drug_interactions     dict
+            issues                list[str]
+            audit                 dict
+            error                 str | None
+        """
+        pid = prescription_id
+
+        if not self._ensure_loaded():
+            return self._build_degraded_response(
+                pid, "Medical & Pharmaceutical Agent unavailable (import failed)"
+            )
+
+        try:
+            extraction_obj = self._to_extraction(extraction, prescription_id=pid)
+            pid = extraction_obj.prescription_id
+            result = self._run_coroutine(self._analyze_fn(extraction_obj))
+        except Exception as exc:
+            return self._build_degraded_response(
+                pid, f"Medical & Pharmaceutical Agent error: {exc}"
+            )
+
+        # Serialize Pydantic model to dict for uniform downstream handling
+        if hasattr(result, "model_dump"):
+            result_dict = result.model_dump()
+        elif hasattr(result, "dict"):
+            result_dict = result.dict()
+        else:
+            result_dict = dict(result)
+
+        status = result_dict.get("status", self._INSUFFICIENT)
+        risk_level = self._RISK_MAP.get(status, "HIGH")
+
+        return {
+            "available": True,
+            "prescription_id": result_dict.get("prescription_id", pid),
+            "status": status,
+            "risk_level": risk_level,
+            # SAFETY: human_review_required is ALWAYS True — never auto-approve
+            "human_review_required": True,
+            # SAFETY: approved is ALWAYS False — clinician must confirm
+            "approved": False,
+            "medications": result_dict.get("medications", []),
+            "drug_interactions": result_dict.get("drug_interactions", {}),
+            "issues": result_dict.get("issues", []),
+            "audit": result_dict.get("audit", {"tools_called": []}),
+            "error": None,
+        }
+
+
 class HealthcareOrchestrator:
-    """Central AI Clinical Agent orchestrating EHR, Clinical Guidelines, and Notification MCP servers."""
+    """Central AI Clinical Agent orchestrating EHR, Clinical Guidelines,
+    Notification MCP servers, and the Medical & Pharmaceutical Agent.
+
+    Architecture
+    ------------
+    This class is the central reasoning layer. Downstream agents and MCP
+    servers are *called by* this class and return structured results. They
+    never become the master controller.
+
+    Medical & Pharma Agent
+    ----------------------
+    Connected via ``MedicalAgentAdapter``. Invoked through
+    ``evaluate_prescription()`` which synthesises its ``AnalysisResponse``
+    into the standard Orchestrator risk format.
+    """
 
     def __init__(self, api_token: str = DEFAULT_TOKEN):
         self.api_token = api_token
         self.ehr = _ehr
         self.clinical = _clinical
         self.notification = _notification
+        # Medical & Pharmaceutical Agent adapter (downstream specialization)
+        self.medical_agent = MedicalAgentAdapter()
 
     def detect_anomalies(self, vitals: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Detect clinical anomalies from vital signs stream."""
@@ -301,6 +576,158 @@ class HealthcareOrchestrator:
                 "success": False,
                 "error": f"Invalid action '{action}'. Expected 'CONFIRM' or 'REJECT'."
             }
+
+    # =========================================================================
+    # Phase 7 — Medical & Pharmaceutical Agent integration
+    # =========================================================================
+
+    def evaluate_prescription(
+        self,
+        extraction: Any,
+        patient_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Orchestrate a prescription analysis through the Medical & Pharma Agent.
+
+        This is the Orchestrator-side entry point for prescription evaluation.
+        It:
+        1. Invokes the Medical & Pharmaceutical Agent (via MedicalAgentAdapter).
+        2. Optionally enriches the result with EHR patient context when a
+           ``patient_id`` is supplied (allergies, chronic conditions).
+        3. Synthesises the agent's structured ``AnalysisResponse`` into the
+           Orchestrator's standard risk / status format.
+        4. Logs a PENDING_CONFIRMATION audit event to Notification-MCP when
+           risk is CRITICAL or HIGH, preserving the human-in-the-loop gate.
+
+        SAFETY INVARIANTS (enforced regardless of Medical Agent output)
+        ---------------------------------------------------------------
+        - ``human_review_required`` is ALWAYS ``True``.
+        - ``approved`` is ALWAYS ``False`` — no prescription is ever
+          auto-approved by the Orchestrator.
+        - ``INFORMATIONAL`` status maps to ``MODERATE`` risk, NOT to safe.
+        - If the Medical Agent is unavailable or raises an exception the result
+          degrades to ``INSUFFICIENT_INFORMATION`` / ``HIGH`` risk — the
+          Orchestrator never crashes and never fabricates clinical evidence.
+
+        Parameters
+        ----------
+        extraction:
+            An ``ExtractionResponse`` instance or a compatible dict describing
+            the parsed prescription (prescription_id, medications, condition,
+            ocr metadata).
+        patient_id:
+            Optional EHR patient ID. When supplied, the Orchestrator fetches
+            the patient's known allergies and conditions from EHR-MCP and
+            includes them in the returned context.
+
+        Returns
+        -------
+        dict with keys:
+            prescription_id           str
+            patient_id                str | None
+            risk_level                str   — CRITICAL | HIGH | MODERATE
+            status                    str   — mirrors AnalysisResponse.status
+            approved                  bool  — always False
+            human_review_required     bool  — always True
+            requires_human_confirmation bool — always True (alias for downstream compat)
+            medical_analysis          dict  — full Medical Agent result payload
+            patient_context           dict | None — EHR context if patient_id supplied
+            event_id                  str | None  — Notification-MCP audit event ID
+            issues                    list[str]
+            drug_interactions         dict
+        """
+        # -----------------------------------------------------------------------
+        # Step 1 — Run Medical & Pharmaceutical Agent
+        # -----------------------------------------------------------------------
+        medical_result = self.medical_agent.run(extraction)
+
+        agent_status: str = medical_result.get("status", "INSUFFICIENT_INFORMATION")
+        prescription_id: str = medical_result.get("prescription_id", "")
+        risk_level: str = medical_result.get("risk_level", "HIGH")
+
+        # -----------------------------------------------------------------------
+        # Step 2 — Optional EHR enrichment
+        # -----------------------------------------------------------------------
+        patient_context: Optional[Dict[str, Any]] = None
+        if patient_id:
+            try:
+                profile = self.ehr.patient_profile(patient_id)
+                if not profile.get("error"):
+                    allergies_res = self.ehr.get_allergies(patient_id, self.api_token)
+                    conditions_res = self.ehr.get_medical_conditions(patient_id, self.api_token)
+                    patient_context = {
+                        "patient_id": patient_id,
+                        "name": profile.get("name"),
+                        "age": profile.get("age"),
+                        "gender": profile.get("gender"),
+                        "allergies": allergies_res.get("allergies", profile.get("allergies", [])),
+                        "conditions": conditions_res.get("conditions", profile.get("conditions", [])),
+                    }
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "evaluate_prescription: EHR enrichment failed for %s — %s",
+                    patient_id, exc
+                )
+
+        # -----------------------------------------------------------------------
+        # Step 3 — Build combined issues list
+        # -----------------------------------------------------------------------
+        issues: List[str] = list(medical_result.get("issues", []))
+        if not medical_result.get("available", True):
+            err = medical_result.get("error", "Medical Agent unavailable")
+            if err and err not in issues:
+                issues.insert(0, err)
+
+        # -----------------------------------------------------------------------
+        # Step 4 — Log audit trail when risk warrants human gate
+        # -----------------------------------------------------------------------
+        event_id: Optional[str] = None
+        if risk_level in ("CRITICAL", "HIGH"):
+            try:
+                issue_summary = (
+                    "; ".join(issues[:3]) if issues
+                    else f"Prescription risk: {agent_status}"
+                )
+                audit_event = self.notification.log_audit_trail(
+                    patient_id=patient_id or "UNKNOWN",
+                    event_type="PRESCRIPTION_REVIEW_REQUIRED",
+                    risk_level=risk_level,
+                    message=(
+                        f"Medical Agent [{agent_status}]: {issue_summary}. "
+                        f"Prescription ID: {prescription_id}."
+                    ),
+                    phone="",
+                    event_state={
+                        "risk": risk_level,
+                        "reason": agent_status,
+                        "prescription_id": prescription_id,
+                        "patient_id": patient_id or "UNKNOWN",
+                    },
+                )
+                event_id = audit_event.get("event_id")
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "evaluate_prescription: Notification MCP audit failed — %s", exc
+                )
+
+        # -----------------------------------------------------------------------
+        # Step 5 — Assemble unified result
+        # Safety Invariants enforced here — these fields are NEVER overridden by
+        # Medical Agent output regardless of status.
+        # -----------------------------------------------------------------------
+        return {
+            "prescription_id": prescription_id,
+            "patient_id": patient_id,
+            "risk_level": risk_level,
+            "status": agent_status,
+            "approved": False,                     # Invariant: never auto-approved
+            "human_review_required": True,         # Invariant: always required
+            "requires_human_confirmation": True,   # Alias for downstream compat
+            "medical_analysis": medical_result,
+            "patient_context": patient_context,
+            "event_id": event_id,
+            "issues": issues,
+            "drug_interactions": medical_result.get("drug_interactions", {}),
+        }
 
 
 def run_demo():
