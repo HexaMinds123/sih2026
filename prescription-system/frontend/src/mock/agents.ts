@@ -1,0 +1,100 @@
+import type { AgentStatus, AgentEvent, OrchestrationResult } from '../types/index'
+
+// DEMO DATA — agent status registry
+export const MOCK_AGENTS: AgentStatus[] = [
+  {
+    id: 'orchestrator',
+    name: 'Healthcare Orchestrator',
+    role: 'Central Reasoning',
+    state: 'ONLINE',
+    lastActivity: '2 min ago',
+    tools: ['evaluate_prescription', 'process_telemetry', 'doctor_decision'],
+    recentCalls: 14,
+    description: 'Coordinates all agents and MCP servers. Performs multi-factor risk assessment. Never delegates reasoning to sub-agents.',
+  },
+  {
+    id: 'medical-agent',
+    name: 'Medical & Pharma Agent',
+    role: 'Prescription Analysis',
+    state: 'ONLINE',
+    lastActivity: '4 min ago',
+    tools: ['analyze_prescription'],
+    recentCalls: 7,
+    description: 'Deterministic prescription analyzer. Receives ExtractionResponse, queries Clinical MCP, returns AnalysisResponse. No LLM involved.',
+  },
+  {
+    id: 'ehr-agent',
+    name: 'EHR Agent',
+    role: 'Patient Context',
+    state: 'ONLINE',
+    lastActivity: '6 min ago',
+    tools: ['patient_profile', 'fetch_active_prescriptions', 'get_allergies', 'get_emergency_contact'],
+    recentCalls: 22,
+    description: 'Retrieves patient demographics, conditions, prescriptions, and allergies from the EHR-MCP server.',
+  },
+  {
+    id: 'notification-agent',
+    name: 'Notification Agent',
+    role: 'Escalation & Audit',
+    state: 'ONLINE',
+    lastActivity: '11 min ago',
+    tools: ['log_audit_trail', 'confirm_escalation', 'reject_escalation', 'trigger_emergency_sms'],
+    recentCalls: 5,
+    description: 'Manages audit trails and emergency escalations. All SMS dispatch requires a human clinician confirmation token.',
+  },
+  {
+    id: 'clinical-mcp',
+    name: 'Clinical MCP',
+    role: 'Clinical Knowledge',
+    state: 'ONLINE',
+    lastActivity: '4 min ago',
+    tools: ['query_drug_interactions', 'search_prescription_guidance', 'search_clinical_guidance'],
+    recentCalls: 18,
+    description: 'Stdio MCP server exposing clinical guidelines and drug interaction matrix via RAG retrieval.',
+  },
+  {
+    id: 'ehr-mcp',
+    name: 'EHR MCP',
+    role: 'Patient Data Store',
+    state: 'ONLINE',
+    lastActivity: '6 min ago',
+    tools: ['patient_profile', 'fetch_active_prescriptions', 'get_allergies', 'get_medical_conditions', 'get_emergency_contact', 'semantic_patient_search'],
+    recentCalls: 22,
+    description: 'SQLite-backed patient database with MongoDB RAG store for semantic patient search.',
+  },
+  {
+    id: 'notification-mcp',
+    name: 'Notification MCP',
+    role: 'Audit & SMS',
+    state: 'ONLINE',
+    lastActivity: '11 min ago',
+    tools: ['log_audit_trail', 'confirm_escalation', 'reject_escalation', 'trigger_emergency_sms', 'get_audit_trail'],
+    recentCalls: 5,
+    description: 'SQLite audit log with tamper-evident trail. SMS dispatch blocked until doctor mints a single-use confirmation token.',
+  },
+]
+
+// DEMO DATA — recent orchestration timeline
+export const MOCK_ORCHESTRATION_EVENTS: AgentEvent[] = [
+  { id: 'e1', timestamp: '2026-09-10T10:41:02Z', agent: 'Orchestrator', event: 'Prescription received', detail: 'ExtractionResponse for RX-WARF forwarded to Medical Agent', status: 'ok' },
+  { id: 'e2', timestamp: '2026-09-10T10:41:03Z', agent: 'Medical Agent', event: 'Connecting to Clinical MCP', detail: 'stdio transport to clinical-mcp/server.py', status: 'ok' },
+  { id: 'e3', timestamp: '2026-09-10T10:41:04Z', agent: 'Clinical MCP', event: 'query_drug_interactions called', detail: 'meds_list: ["Warfarin", "Aspirin"]', status: 'warn' },
+  { id: 'e4', timestamp: '2026-09-10T10:41:05Z', agent: 'Clinical MCP', event: 'High-severity interaction detected', detail: 'Warfarin + Aspirin → bleeding risk (severity: high)', status: 'error' },
+  { id: 'e5', timestamp: '2026-09-10T10:41:05Z', agent: 'Medical Agent', event: 'AnalysisResponse returned', detail: 'status: CRITICAL_REVIEW_REQUIRED, human_review_required: true', status: 'warn' },
+  { id: 'e6', timestamp: '2026-09-10T10:41:06Z', agent: 'Orchestrator', event: 'Risk synthesis: CRITICAL', detail: 'CRITICAL_REVIEW_REQUIRED → risk_level=CRITICAL, approved=false', status: 'error' },
+  { id: 'e7', timestamp: '2026-09-10T10:41:06Z', agent: 'EHR Agent', event: 'Patient context retrieved', detail: 'P003 Marcus Vance — conditions: CAD, Heart Failure, CKD', status: 'ok' },
+  { id: 'e8', timestamp: '2026-09-10T10:41:07Z', agent: 'Notification Agent', event: 'Audit trail logged', detail: 'EVENT-WARF-001 → PRESCRIPTION_REVIEW / PENDING_CONFIRMATION', status: 'ok' },
+  { id: 'e9', timestamp: '2026-09-10T10:41:07Z', agent: 'Orchestrator', event: 'Result dispatched to clinician dashboard', detail: 'human_review_required: true — awaiting CONFIRM or REJECT', status: 'info' },
+]
+
+export const MOCK_ORCHESTRATION_RESULT: OrchestrationResult = {
+  orchestration_id: 'ORCH-2026-09-10-001',
+  patient_id: 'P003',
+  risk_level: 'CRITICAL',
+  status: 'PENDING_CONFIRMATION',
+  approved: false,
+  human_review_required: true,
+  events: MOCK_ORCHESTRATION_EVENTS,
+  final_message: 'Prescription RX-WARF flagged CRITICAL. High-severity Warfarin + Aspirin interaction detected. Awaiting clinician confirmation.',
+  timestamp: '2026-09-10T10:41:07Z',
+}

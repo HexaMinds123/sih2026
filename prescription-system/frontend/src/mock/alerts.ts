@@ -1,0 +1,61 @@
+import type { Alert } from '../types/index'
+
+// DEMO DATA — active alerts across patients
+export const MOCK_ALERTS: Alert[] = [
+  {
+    id: 'ALT-001',
+    severity: 'CRITICAL',
+    category: 'DRUG_INTERACTION',
+    title: 'Critical Drug Interaction: Warfarin + Aspirin',
+    detail: 'High-severity interaction detected. Concurrent use significantly increases bleeding risk.',
+    patient_id: 'P003',
+    patient_name: 'Marcus Vance',
+    timestamp: '2026-09-10T10:41:07Z',
+    status: 'PENDING_CONFIRMATION',
+    event_id: 'EVENT-WARF-001',
+    escalation_chain: [
+      { step: 'EVENT detected', actor: 'Clinical MCP', timestamp: '10:41:04', status: 'done' },
+      { step: 'Medical Agent analyzed', actor: 'Medical Agent', timestamp: '10:41:05', status: 'done' },
+      { step: 'Orchestrator risk: CRITICAL', actor: 'Orchestrator', timestamp: '10:41:06', status: 'done' },
+      { step: 'Audit trail logged', actor: 'Notification MCP', timestamp: '10:41:07', status: 'done' },
+      { step: 'Clinician decision', actor: 'Dr. on duty', timestamp: '—', status: 'pending' },
+      { step: 'SMS dispatch (if confirmed)', actor: 'Notification MCP', timestamp: '—', status: 'pending' },
+    ],
+  },
+  {
+    id: 'ALT-002',
+    severity: 'HIGH',
+    category: 'VITALS',
+    title: 'Elevated Blood Pressure & Tachycardia',
+    detail: 'SpO2 94%, HR 91 bpm, BP 148/93 mmHg recorded at 10:00. EHR context shows Hypertension history.',
+    patient_id: 'P001',
+    patient_name: 'Sarah Mitchell',
+    timestamp: '2026-09-10T10:00:00Z',
+    status: 'PENDING_CONFIRMATION',
+    event_id: 'EVENT-VITS-002',
+    escalation_chain: [
+      { step: 'Anomaly detected', actor: 'Orchestrator', timestamp: '10:00:01', status: 'done' },
+      { step: 'EHR context retrieved', actor: 'EHR Agent', timestamp: '10:00:02', status: 'done' },
+      { step: 'Clinical guideline matched', actor: 'Clinical MCP', timestamp: '10:00:03', status: 'done' },
+      { step: 'Audit trail logged', actor: 'Notification MCP', timestamp: '10:00:04', status: 'done' },
+      { step: 'Clinician decision', actor: 'Dr. on duty', timestamp: '—', status: 'pending' },
+    ],
+  },
+  {
+    id: 'ALT-003',
+    severity: 'MODERATE',
+    category: 'PRESCRIPTION_REVIEW',
+    title: 'Prescription Requires Review: Missing Dosage',
+    detail: 'Extracted prescription missing dosage for Amoxicillin. OCR confidence: 78%. Human review required.',
+    patient_id: 'P002',
+    patient_name: 'Robert Chen',
+    timestamp: '2026-09-10T09:30:00Z',
+    status: 'PENDING_CONFIRMATION',
+    escalation_chain: [
+      { step: 'Prescription uploaded', actor: 'System', timestamp: '09:29:50', status: 'done' },
+      { step: 'OCR extraction', actor: 'Prescription System', timestamp: '09:29:55', status: 'done' },
+      { step: 'Medical Agent: REVIEW_REQUIRED', actor: 'Medical Agent', timestamp: '09:30:00', status: 'done' },
+      { step: 'Clinician review', actor: 'Pharmacist', timestamp: '—', status: 'pending' },
+    ],
+  },
+]

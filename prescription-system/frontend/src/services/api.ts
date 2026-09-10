@@ -1,4 +1,4 @@
-import type { Analysis, Extraction } from './types'
+import type { Analysis, Extraction } from '../types/index'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) || '/api'
 
@@ -17,6 +17,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>
 }
 
+// ── Existing prescription endpoints (real) ────────────────────────────────────
+
 export function uploadPrescription(file: File) {
   const body = new FormData()
   body.append('file', file)
@@ -33,9 +35,14 @@ export function extractPrescription(id: string) {
 export function analyzePrescription(id: string) {
   return request<Analysis>(`/prescription/${encodeURIComponent(id)}/analyze`, { method: 'POST' })
 }
-export {
-  uploadPrescription,
-  extractPrescription,
-  analyzePrescription,
-  checkHealth,
-} from './services/api'
+
+// ── Health check (real) ───────────────────────────────────────────────────────
+
+export async function checkHealth(): Promise<boolean> {
+  try {
+    const res = await request<{ status: string }>('/health')
+    return res.status === 'ok'
+  } catch {
+    return false
+  }
+}
